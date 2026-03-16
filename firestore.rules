@@ -1,0 +1,150 @@
+// ===============================================================
+// Assumed Data Model
+// ===============================================================
+//
+// Collection: users
+// Document ID: {userId}
+// Fields:
+//   - uid: string (required, immutable) - The Firebase Auth UID
+//   - username: string (required) - Display name
+//   - role: string (required) - 'admin' or 'user'
+//   - createdAt: number (required, immutable) - Timestamp
+//
+// Collection: patients
+// Document ID: {patientId}
+// Fields:
+//   - id: string (required, immutable) - Unique ID
+//   - authorUid: string (required, immutable) - The UID of the user who created it
+//   - patientName: string (required)
+//   - age: string (optional)
+//   - sex: string (optional)
+//   - phone: string (optional)
+//   - email: string (optional)
+//   - address: string (optional)
+//   - complaint: string (optional)
+//   - symptoms: string (optional)
+//   - selectedSymptoms: list (optional)
+//   - tongue: map (optional)
+//   - pulse: map (optional)
+//   - diagnosis: map (optional)
+//   - timestamp: number (required, immutable)
+//   - medicalHistory: string (optional)
+//   - biomedicalDiagnosis: string (optional)
+//   - icd10: string (optional)
+//   - medications: string (optional)
+//   - followUpDate: string (optional)
+//   - notes: string (optional)
+//
+// ===============================================================
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    function isDocOwner() {
+      return isAuthenticated() && request.auth.uid == resource.data.authorUid;
+    }
+    
+    function isAdmin() {
+      return isAuthenticated() && 
+        (
+          (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+           get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin') ||
+          (request.auth.token.email == "nvardi75@gmail.com" && request.auth.token.email_verified == true)
+        );
+    }
+    
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    function isValidUser(data) {
+      return hasRequiredFields(['uid', 'username', 'role', 'createdAt']) &&
+             data.uid is string && data.uid.size() > 0 &&
+             data.username is string && data.username.size() > 0 && data.username.size() < 100 &&
+             data.role in ['admin', 'user'] &&
+             data.createdAt is number;
+    }
+    
+    function isValidPatient(data) {
+      return hasRequiredFields(['id', 'authorUid', 'patientName', 'timestamp']) &&
+             data.id is string && data.id.size() > 0 && data.id.size() < 50 &&
+             data.authorUid is string && data.authorUid.size() > 0 &&
+             data.patientName is string && data.patientName.size() > 0 && data.patientName.size() < 150 &&
+             data.timestamp is number &&
+             (!('age' in data) || (data.age is string && data.age.size() < 20)) &&
+             (!('sex' in data) || (data.sex is string && data.sex.size() < 20)) &&
+             (!('phone' in data) || (data.phone is string && data.phone.size() < 30)) &&
+             (!('email' in data) || (data.email is string && data.email.size() < 100)) &&
+             (!('address' in data) || (data.address is string && data.address.size() < 500)) &&
+             (!('complaint' in data) || (data.complaint is string && data.complaint.size() < 2000)) &&
+             (!('symptoms' in data) || (data.symptoms is string && data.symptoms.size() < 2000)) &&
+             (!('selectedSymptoms' in data) || (data.selectedSymptoms is list && data.selectedSymptoms.size() < 100)) &&
+             (!('tongue' in data) || data.tongue is map) &&
+             (!('pulse' in data) || data.pulse is map) &&
+             (!('diagnosis' in data) || data.diagnosis is map) &&
+             (!('medicalHistory' in data) || (data.medicalHistory is string && data.medicalHistory.size() < 2000)) &&
+             (!('biomedicalDiagnosis' in data) || (data.biomedicalDiagnosis is string && data.biomedicalDiagnosis.size() < 500)) &&
+             (!('icd10' in data) || (data.icd10 is string && data.icd10.size() < 50)) &&
+             (!('medications' in data) || (data.medications is string && data.medications.size() < 1000)) &&
+             (!('followUpDate' in data) || (data.followUpDate is string && data.followUpDate.size() < 50)) &&
+             (!('notes' in data) || (data.notes is string && data.notes.size() < 5000));
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read: if isAuthenticated(); // Users can see other users (e.g. for admin assignment)
+      
+      // Allow create if authenticated, valid, uid matches, and user is not assigning themselves admin (unless they are already admin)
+      allow create: if isOwner(userId) && 
+                       isValidUser(request.resource.data) && 
+                       request.resource.data.uid == request.auth.uid &&
+                       (request.resource.data.role == 'user' || isAdmin());
+                       
+      // Allow update if admin, or if user is updating their own profile without changing role/uid/createdAt
+      allow update: if isOwner(userId) && 
+                       isValidUser(request.resource.data) &&
+                       request.resource.data.uid == resource.data.uid &&
+                       request.resource.data.createdAt == resource.data.createdAt &&
+                       (request.resource.data.role == resource.data.role || isAdmin());
+                       
+      allow delete: if isAdmin();
+    }
+
+    match /patients/{patientId} {
+      // Users can read their own patients, admins can read all
+      allow read: if isAuthenticated() && (resource.data.authorUid == request.auth.uid || isAdmin());
+      
+      // Users can create patients, authorUid must match their own uid
+      allow create: if isAuthenticated() && 
+                       isValidPatient(request.resource.data) &&
+                       request.resource.data.authorUid == request.auth.uid;
+                       
+      // Users can update their own patients, admins can update all. Immutable fields must remain unchanged.
+      allow update: if isAuthenticated() && 
+                       isValidPatient(request.resource.data) &&
+                       (isDocOwner() || isAdmin()) &&
+                       request.resource.data.id == resource.data.id &&
+                       request.resource.data.authorUid == resource.data.authorUid &&
+                       request.resource.data.timestamp == resource.data.timestamp;
+                       
+      // Users can delete their own patients, admins can delete all
+      allow delete: if isAuthenticated() && (isDocOwner() || isAdmin());
+    }
+  }
+}
